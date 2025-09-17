@@ -208,7 +208,7 @@ const createContactEmailTemplate = (formData) => {
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174', 'https://yourdomain.com', 'https://ccfrescue.org', 'https://www.ccfrescue.org'],
+  origin: true, // Allow all origins temporarily
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
