@@ -208,14 +208,29 @@ const createContactEmailTemplate = (formData) => {
 
 // Middleware
 app.use(cors({
-  origin: true, // Allow all origins temporarily
+  origin: [
+    'http://localhost:5173',
+    'http://localhost:5174', 
+    'https://ccfrescue.org',
+    'https://www.ccfrescue.org'
+  ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
 }));
 
 // Additional CORS headers for preflight requests
-app.options('*', cors());
+app.options('*', cors({
+  origin: [
+    'http://localhost:5173',
+    'http://localhost:5174', 
+    'https://ccfrescue.org',
+    'https://www.ccfrescue.org'
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
+}));
 
 app.use(express.json());
 
