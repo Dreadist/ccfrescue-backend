@@ -213,6 +213,10 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Additional CORS headers for preflight requests
+app.options('*', cors());
+
 app.use(express.json());
 
 // Health check endpoint
