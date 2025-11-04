@@ -1,0 +1,19 @@
+# Production Environment Configuration
+# Rename this file to .env for production use
+
+NODE_ENV=production
+
+# Hostinger MySQL Database Configuration
+DB_HOST=127.0.0.1
+DB_USER=your_hostinger_db_username
+DB_PASSWORD=your_hostinger_db_password
+DB_NAME=your_hostinger_db_name
+DB_PORT=3306
+
+# Email Configuration (Nodemailer) - Production
+EMAIL_USER=your_email@yourdomain.com
+EMAIL_PASS=your_email_password
+ADMIN_EMAIL=admin@ccfrescue.org
+
+# Server Configuration
+PORT=3001

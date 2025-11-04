@@ -1,11 +1,412 @@
 const express = require('express');
-const Stripe = require('stripe');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
-require('dotenv').config();
+const fs = require('fs').promises;
+const path = require('path');
+const multer = require('multer');
+const mysql = require('mysql2/promise');
+
+// Load environment variables - try .env.dev first, then .env
+try {
+  require('dotenv').config({ path: '.env.dev' });
+  console.log('Loaded .env.dev configuration');
+} catch (error) {
+  require('dotenv').config();
+  console.log('Loaded .env configuration');
+}
 
 const app = express();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+// Multer configuration for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadPath = path.join(__dirname, 'uploads', 'pets');
+    cb(null, uploadPath);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      const error = new Error('Only image files are allowed!');
+      error.code = 'INVALID_FILE_TYPE';
+      cb(error, false);
+    }
+  }
+});
+
+// Error handling middleware for multer
+const handleMulterError = (error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({
+        error: 'File too large',
+        message: 'File size must be less than 5MB'
+      });
+    }
+    return res.status(400).json({
+      error: 'File upload error',
+      message: error.message
+    });
+  }
+  if (error.code === 'INVALID_FILE_TYPE') {
+    return res.status(400).json({
+      error: 'Invalid file type',
+      message: 'Only image files are allowed'
+    });
+  }
+  next(error);
+};
+
+// MySQL Database Configuration function
+function getDbConfig() {
+  return {
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'ccfrescue_dev',
+    port: process.env.DB_PORT || 3306,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+  };
+}
+
+// Create database connection pool
+let pool;
+
+// Ensure directories exist for uploads
+async function ensureDirectories() {
+  try {
+    await fs.mkdir(path.join(__dirname, 'uploads', 'pets'), { recursive: true });
+  } catch (error) {
+    console.error('Error creating directories:', error);
+  }
+}
+
+// Database initialization
+async function initializeDatabase() {
+  try {
+    console.log('Attempting to connect to database...');
+    
+    // Get current database configuration
+    const dbConfig = getDbConfig();
+    
+    // Debug: Log database configuration
+    console.log('Environment:', process.env.NODE_ENV);
+    console.log('Database Config:', {
+      host: dbConfig.host,
+      user: dbConfig.user,
+      database: dbConfig.database,
+      port: dbConfig.port,
+      password: dbConfig.password ? '[HIDDEN]' : '[EMPTY]'
+    });
+    
+    // Create connection pool
+    pool = mysql.createPool(dbConfig);
+    
+    // Use direct connection for initialization
+    const connection = await mysql.createConnection(dbConfig);
+    console.log('✅ Database connection successful!');
+    
+    // Test the connection
+    await connection.execute('SELECT 1 as test');
+    console.log('✅ Database query test successful!');
+    
+    // Create animals table if it doesn't exist (matching your actual schema)
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS animals (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        species VARCHAR(50) NOT NULL,
+        breed VARCHAR(100),
+        age_months INT,
+        gender VARCHAR(10),
+        size VARCHAR(20),
+        color VARCHAR(100),
+        description TEXT,
+        intake_date DATE NOT NULL,
+        status VARCHAR(50) DEFAULT 'available',
+        medical_notes TEXT,
+        behavior_notes TEXT,
+        special_needs TEXT,
+        photo_urls LONGTEXT,
+        primary_photo_index INT DEFAULT 0,
+        microchip_id VARCHAR(100),
+        adoption_fee DECIMAL(10,2),
+        created_by INT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Add primary_photo_index column if it doesn't exist (for existing databases)
+    try {
+      await connection.execute(`
+        ALTER TABLE animals 
+        ADD COLUMN IF NOT EXISTS primary_photo_index INT DEFAULT 0
+      `);
+      console.log('✅ Primary photo index column added/verified');
+    } catch (error) {
+      console.log('Primary photo index column already exists or error adding:', error.message);
+    }
+    
+    await connection.end();
+    console.log('✅ Database initialized successfully');
+  } catch (error) {
+    console.error('❌ Error initializing database:', error.message);
+    console.log('Continuing without database initialization...');
+  }
+}
+
+// Pet data management functions
+async function getPets() {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM animals ORDER BY created_at DESC');
+    
+    // Map database fields to frontend expected format
+    const mappedPets = rows.map(animal => {
+      // Debug photo_urls processing
+      console.log(`Processing animal ${animal.id} (${animal.name}):`);
+      console.log(`  Raw photo_urls:`, animal.photo_urls);
+      console.log(`  Primary photo index:`, animal.primary_photo_index);
+      console.log(`  Type:`, typeof animal.photo_urls);
+      
+      let imageUrl = '';
+      let allPhotoUrls = [];
+      
+      if (animal.photo_urls) {
+        try {
+          if (typeof animal.photo_urls === 'string') {
+            allPhotoUrls = JSON.parse(animal.photo_urls);
+          } else {
+            allPhotoUrls = animal.photo_urls;
+          }
+          
+          // Use primary photo index to select the correct photo
+          const primaryIndex = animal.primary_photo_index || 0;
+          if (Array.isArray(allPhotoUrls) && allPhotoUrls.length > 0) {
+            // Ensure index is within bounds, fallback to first photo if invalid
+            const validIndex = primaryIndex >= 0 && primaryIndex < allPhotoUrls.length ? primaryIndex : 0;
+            imageUrl = allPhotoUrls[validIndex] || '';
+          }
+        } catch (e) {
+          console.log(`  JSON parse error:`, e.message);
+          imageUrl = animal.photo_urls || '';
+          allPhotoUrls = [];
+        }
+      }
+      
+      console.log(`  All photo URLs:`, allPhotoUrls);
+      console.log(`  Final imageUrl:`, imageUrl);
+      
+      return {
+        id: animal.id,
+        name: animal.name,
+        species: animal.species,
+        breed: animal.breed || '',
+        age: animal.age_months ? `${Math.floor(animal.age_months / 12)} years ${animal.age_months % 12} months` : 'Unknown',
+        gender: animal.gender || 'Unknown',
+        size: animal.size || 'Unknown',
+        color: animal.color || 'Unknown',
+        status: animal.status || 'available',
+        description: animal.description || '',
+        specialNeeds: animal.special_needs || '',
+        medicalInfo: animal.medical_notes || '',
+        behaviorNotes: animal.behavior_notes || '',
+        location: '', // Not in your schema
+        imageUrl: imageUrl,
+        allPhotoUrls: allPhotoUrls,
+        primaryPhotoIndex: animal.primary_photo_index || 0,
+        microchipId: animal.microchip_id || '',
+        adoptionFee: animal.adoption_fee || 0,
+        intakeDate: animal.intake_date,
+        dateAdded: animal.created_at,
+        lastUpdated: animal.updated_at
+      };
+    });
+    
+    return mappedPets;
+  } catch (error) {
+    console.error('Error fetching pets from database:', error);
+    return [];
+  }
+}
+
+async function getPetById(id) {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM animals WHERE id = ?', [id]);
+    if (rows.length === 0) return null;
+    
+    const animal = rows[0];
+    
+    // Debug photo_urls processing
+    console.log(`Processing single animal ${animal.id} (${animal.name}):`);
+    console.log(`  Raw photo_urls:`, animal.photo_urls);
+    console.log(`  Primary photo index:`, animal.primary_photo_index);
+    console.log(`  Type:`, typeof animal.photo_urls);
+    
+    let imageUrl = '';
+    let allPhotoUrls = [];
+    
+    if (animal.photo_urls) {
+      try {
+        if (typeof animal.photo_urls === 'string') {
+          allPhotoUrls = JSON.parse(animal.photo_urls);
+        } else {
+          allPhotoUrls = animal.photo_urls;
+        }
+        
+        // Use primary photo index to select the correct photo
+        const primaryIndex = animal.primary_photo_index || 0;
+        if (Array.isArray(allPhotoUrls) && allPhotoUrls.length > 0) {
+          // Ensure index is within bounds, fallback to first photo if invalid
+          const validIndex = primaryIndex >= 0 && primaryIndex < allPhotoUrls.length ? primaryIndex : 0;
+          imageUrl = allPhotoUrls[validIndex] || '';
+        }
+      } catch (e) {
+        console.log(`  JSON parse error:`, e.message);
+        imageUrl = animal.photo_urls || '';
+        allPhotoUrls = [];
+      }
+    }
+    
+    console.log(`  All photo URLs:`, allPhotoUrls);
+    console.log(`  Final imageUrl:`, imageUrl);
+    
+    // Map database fields to frontend expected format
+    return {
+      id: animal.id,
+      name: animal.name,
+      species: animal.species,
+      breed: animal.breed || '',
+      age: animal.age_months ? `${Math.floor(animal.age_months / 12)} years ${animal.age_months % 12} months` : 'Unknown',
+      gender: animal.gender || 'Unknown',
+      size: animal.size || 'Unknown',
+      color: animal.color || 'Unknown',
+      status: animal.status || 'available',
+      description: animal.description || '',
+      specialNeeds: animal.special_needs || '',
+      medicalInfo: animal.medical_notes || '',
+      behaviorNotes: animal.behavior_notes || '',
+      location: '', // Not in your schema
+      imageUrl: imageUrl,
+      allPhotoUrls: allPhotoUrls,
+      primaryPhotoIndex: animal.primary_photo_index || 0,
+      microchipId: animal.microchip_id || '',
+      adoptionFee: animal.adoption_fee || 0,
+      intakeDate: animal.intake_date,
+      dateAdded: animal.created_at,
+      lastUpdated: animal.updated_at
+    };
+  } catch (error) {
+    console.error('Error fetching pet by ID:', error);
+    return null;
+  }
+}
+
+async function addPet(petData) {
+  try {
+    const {
+      name, species, breed, age, gender, size, status, color,
+      description, specialNeeds, medicalInfo, behaviorNotes, imageUrl,
+      microchipId, adoptionFee, intakeDate
+    } = petData;
+    
+    // Convert age string to months (basic conversion)
+    let ageMonths = null;
+    if (age && typeof age === 'string') {
+      const ageMatch = age.match(/(\d+)\s*years?\s*(\d+)\s*months?/);
+      if (ageMatch) {
+        ageMonths = parseInt(ageMatch[1]) * 12 + parseInt(ageMatch[2]);
+      } else {
+        const monthMatch = age.match(/(\d+)\s*months?/);
+        if (monthMatch) {
+          ageMonths = parseInt(monthMatch[1]);
+        }
+      }
+    }
+    
+    const photoUrls = imageUrl ? JSON.stringify([imageUrl]) : null;
+    const intakeDateValue = intakeDate || new Date().toISOString().split('T')[0];
+    
+    const [result] = await pool.execute(`
+      INSERT INTO animals (name, species, breed, age_months, gender, size, color, status, description, special_needs, medical_notes, behavior_notes, photo_urls, microchip_id, adoption_fee, intake_date)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [name, species, breed, ageMonths, gender, size, color, status, description, specialNeeds, medicalInfo, behaviorNotes, photoUrls, microchipId, adoptionFee, intakeDateValue]);
+    
+    return { id: result.insertId, ...petData };
+  } catch (error) {
+    console.error('Error adding pet to database:', error);
+    throw error;
+  }
+}
+
+async function updatePet(id, petData) {
+  try {
+    const {
+      name, species, breed, age, gender, size, status, color,
+      description, specialNeeds, medicalInfo, behaviorNotes, imageUrl,
+      microchipId, adoptionFee, intakeDate
+    } = petData;
+    
+    // Convert age string to months (basic conversion)
+    let ageMonths = null;
+    if (age && typeof age === 'string') {
+      const ageMatch = age.match(/(\d+)\s*years?\s*(\d+)\s*months?/);
+      if (ageMatch) {
+        ageMonths = parseInt(ageMatch[1]) * 12 + parseInt(ageMatch[2]);
+      } else {
+        const monthMatch = age.match(/(\d+)\s*months?/);
+        if (monthMatch) {
+          ageMonths = parseInt(monthMatch[1]);
+        }
+      }
+    }
+    
+    const photoUrls = imageUrl ? JSON.stringify([imageUrl]) : null;
+    
+    await pool.execute(`
+      UPDATE animals 
+      SET name = ?, species = ?, breed = ?, age_months = ?, gender = ?, size = ?, color = ?, status = ?,
+          description = ?, special_needs = ?, medical_notes = ?, behavior_notes = ?, photo_urls = ?,
+          microchip_id = ?, adoption_fee = ?, intake_date = ?
+      WHERE id = ?
+    `, [name, species, breed, ageMonths, gender, size, color, status, description, specialNeeds, medicalInfo, behaviorNotes, photoUrls, microchipId, adoptionFee, intakeDate, id]);
+    
+    return { id, ...petData };
+  } catch (error) {
+    console.error('Error updating pet in database:', error);
+    throw error;
+  }
+}
+
+async function deletePet(id) {
+  try {
+    const pet = await getPetById(id);
+    if (!pet) return null;
+    
+    await pool.execute('DELETE FROM animals WHERE id = ?', [id]);
+    return pet;
+  } catch (error) {
+    console.error('Error deleting pet from database:', error);
+    throw error;
+  }
+}
+
+// Initialize database and directories on startup
+ensureDirectories();
+initializeDatabase();
 
 // Nodemailer configuration for Hostinger
 const transporter = nodemailer.createTransport({
@@ -94,6 +495,47 @@ const createVolunteerEmailTemplate = (formData) => {
 };
 
 const createFosterEmailTemplate = (formData) => {
+  console.log('Email template received formData:', JSON.stringify(formData, null, 2));
+  console.log('interestedPet in template:', formData.interestedPet);
+  console.log('petInfo in template:', formData.petInfo);
+  
+  // Helper function to safely get pet info
+  const petInfo = formData.petInfo || {};
+  const hasPetInfo = petInfo && Object.keys(petInfo).length > 0;
+  
+  // Build pet information section
+  let petInfoSection = '';
+  if (hasPetInfo) {
+    petInfoSection = `
+        <div class="section" style="background: #fff8e1; border-left: 4px solid #ff9800;">
+          <h3>🐾 Pet Information - Interested in Fostering</h3>
+          <div class="field"><span class="label">Name:</span> <span class="value">${petInfo.name || 'N/A'}</span></div>
+          <div class="field"><span class="label">ID:</span> <span class="value">${petInfo.id || 'N/A'}</span></div>
+          <div class="field"><span class="label">Species:</span> <span class="value">${petInfo.species || 'N/A'} ${petInfo.breed ? `(${petInfo.breed})` : ''}</span></div>
+          <div class="field"><span class="label">Age:</span> <span class="value">${petInfo.age || 'N/A'}</span></div>
+          <div class="field"><span class="label">Gender:</span> <span class="value">${petInfo.gender || 'N/A'}</span></div>
+          <div class="field"><span class="label">Size:</span> <span class="value">${petInfo.size || 'N/A'}</span></div>
+          ${petInfo.color ? `<div class="field"><span class="label">Color:</span> <span class="value">${petInfo.color}</span></div>` : ''}
+          ${petInfo.status ? `<div class="field"><span class="label">Status:</span> <span class="value">${petInfo.status}</span></div>` : ''}
+          ${petInfo.adoptionFee ? `<div class="field"><span class="label">Adoption Fee:</span> <span class="value">$${petInfo.adoptionFee}</span></div>` : ''}
+          ${petInfo.microchipId ? `<div class="field"><span class="label">Microchip ID:</span> <span class="value">${petInfo.microchipId}</span></div>` : ''}
+          ${petInfo.description ? `<div class="field" style="margin-top: 12px;"><span class="label">Description:</span><div class="value" style="margin-top: 4px; font-style: italic;">${petInfo.description}</div></div>` : ''}
+          ${petInfo.specialNeeds ? `<div class="field" style="margin-top: 12px;"><span class="label">Special Needs:</span><div class="value" style="margin-top: 4px; color: #d32f2f;">${petInfo.specialNeeds}</div></div>` : ''}
+          ${petInfo.medicalInfo ? `<div class="field" style="margin-top: 12px;"><span class="label">Medical Information:</span><div class="value" style="margin-top: 4px;">${petInfo.medicalInfo}</div></div>` : ''}
+          ${petInfo.behaviorNotes ? `<div class="field" style="margin-top: 12px;"><span class="label">Behavior Notes:</span><div class="value" style="margin-top: 4px;">${petInfo.behaviorNotes}</div></div>` : ''}
+          ${petInfo.imageUrl ? `<div class="field" style="margin-top: 12px;"><span class="label">Photo URL:</span><div class="value" style="margin-top: 4px; word-break: break-all;">${petInfo.imageUrl}</div></div>` : ''}
+        </div>
+    `;
+  } else if (formData.interestedPet) {
+    // Fallback to old format if petInfo is not available
+    petInfoSection = `
+        <div class="section">
+          <h3>🐾 Interested in Fostering</h3>
+          <div class="field"><span class="label">Pet:</span> <span class="value">${formData.interestedPet}</span></div>
+        </div>
+    `;
+  }
+  
   return `
     <!DOCTYPE html>
     <html>
@@ -126,6 +568,8 @@ const createFosterEmailTemplate = (formData) => {
           <div class="field"><span class="label">Phone:</span> <span class="value">${formData.phone}</span></div>
           <div class="field"><span class="label">Address:</span> <span class="value">${formData.address}</span></div>
         </div>
+        
+        ${petInfoSection}
         
         <div class="section">
           <h3>🏡 Home Information</h3>
@@ -241,51 +685,13 @@ app.options('*', cors({
 }));
 
 app.use(express.json());
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ message: 'Chester & Chubbs Foundation API is running!' });
 });
 
-// Create payment intent endpoint
-app.post('/api/create-payment-intent', async (req, res) => {
-  try {
-    const { amount, currency = 'usd', metadata = {} } = req.body;
-
-    // Validate amount (minimum $5.00)
-    if (!amount || amount < 500) {
-      return res.status(400).json({ 
-        error: 'Invalid amount. Minimum donation is $5.00.' 
-      });
-    }
-
-    // Create payment intent
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amount,
-      currency: currency,
-      automatic_payment_methods: {
-        enabled: true,
-      },
-      metadata: {
-        ...metadata,
-        timestamp: new Date().toISOString(),
-        organization: 'Chester & Chubbs Foundation',
-      },
-    });
-
-    res.json({ 
-      client_secret: paymentIntent.client_secret,
-      payment_intent_id: paymentIntent.id
-    });
-
-  } catch (error) {
-    console.error('Error creating payment intent:', error);
-    res.status(500).json({ 
-      error: 'Error creating payment intent',
-      message: error.message 
-    });
-  }
-});
 
 // Volunteer form submission endpoint
 app.post('/api/submit-volunteer', async (req, res) => {
@@ -354,9 +760,13 @@ app.post('/api/submit-volunteer', async (req, res) => {
 app.post('/api/submit-foster', async (req, res) => {
   try {
     const formData = req.body;
+    console.log('Foster form data received:', JSON.stringify(formData, null, 2));
     
-    // Validate required fields
-    const requiredFields = ['name', 'email', 'phone', 'address', 'homeOwnership', 'animalType', 'hasOtherPets', 'availability', 'about'];
+    // Validate required fields - animalType is only required if petInfo is not provided
+    const requiredFields = ['name', 'email', 'phone', 'address', 'homeOwnership', 'hasOtherPets', 'availability', 'about'];
+    if (!formData.petInfo) {
+      requiredFields.push('animalType');
+    }
     const missingFields = requiredFields.filter(field => !formData[field]);
     
     if (missingFields.length > 0) {
@@ -366,17 +776,30 @@ app.post('/api/submit-foster', async (req, res) => {
       });
     }
     
-    // Prepare email data
+    // Prepare email data - include all formData including petInfo
     const emailData = {
       ...formData,
-      adultConsent: formData.isAdultOrConsent ? 'Yes' : 'No'
+      adultConsent: formData.isAdultOrConsent ? 'Yes' : 'No',
+      interestedPet: formData.interestedPet || '' // Ensure interestedPet is included for backward compatibility
+      // petInfo is already included in formData via spread operator
     };
     
-    // Send email
+    // Send email - use petInfo.name if available, otherwise fall back to interestedPet
+    let subject = 'New Foster Application - Chester & Chubbs Foundation';
+    if (formData.petInfo && formData.petInfo.name) {
+      subject = `New Foster Application for ${formData.petInfo.name} - Chester & Chubbs Foundation`;
+    } else if (formData.interestedPet) {
+      subject = `New Foster Application for ${formData.interestedPet} - Chester & Chubbs Foundation`;
+    }
+    
+    console.log('Email data being sent to template:', JSON.stringify(emailData, null, 2));
+    console.log('interestedPet value:', emailData.interestedPet);
+    console.log('petInfo value:', emailData.petInfo);
+    
     const mailOptions = {
       from: process.env.EMAIL_USER,
       to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
-      subject: 'New Foster Application - Chester & Chubbs Foundation',
+      subject: subject,
       html: createFosterEmailTemplate(emailData)
     };
     
@@ -436,35 +859,163 @@ app.post('/api/submit-contact', async (req, res) => {
   }
 });
 
-// Webhook endpoint for payment confirmations
-app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
+// Pet Management API Endpoints
 
+// Get all pets
+app.get('/api/pets', async (req, res) => {
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    console.error('Webhook signature verification failed:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    const pets = await getPets();
+    res.json({ success: true, pets });
+  } catch (error) {
+    console.error('Error fetching pets:', error);
+    res.status(500).json({ 
+      error: 'Error fetching pets',
+      message: error.message 
+    });
   }
-
-  // Handle the event
-  switch (event.type) {
-    case 'payment_intent.succeeded':
-      const paymentIntent = event.data.object;
-      console.log('Payment succeeded:', paymentIntent.id);
-      // Here you can send confirmation emails, update database, etc.
-      break;
-    case 'payment_intent.payment_failed':
-      const failedPayment = event.data.object;
-      console.log('Payment failed:', failedPayment.id);
-      break;
-    default:
-      console.log(`Unhandled event type ${event.type}`);
-  }
-
-  res.json({ received: true });
 });
+
+// Get a specific pet by ID
+app.get('/api/pets/:id', async (req, res) => {
+  try {
+    const pet = await getPetById(req.params.id);
+    
+    if (!pet) {
+      return res.status(404).json({ 
+        error: 'Pet not found' 
+      });
+    }
+    
+    res.json({ success: true, pet });
+  } catch (error) {
+    console.error('Error fetching pet:', error);
+    res.status(500).json({ 
+      error: 'Error fetching pet',
+      message: error.message 
+    });
+  }
+});
+
+// Add a new pet
+app.post('/api/pets', upload.single('image'), handleMulterError, async (req, res) => {
+  try {
+    const { name, species, breed, age, gender, size, status, description, specialNeeds, medicalInfo, location } = req.body;
+    
+    // Validate required fields
+    const requiredFields = ['name', 'species', 'age', 'gender', 'size', 'status', 'description'];
+    const missingFields = requiredFields.filter(field => !req.body[field]);
+    
+    if (missingFields.length > 0) {
+      return res.status(400).json({ 
+        error: 'Missing required fields', 
+        missingFields 
+      });
+    }
+    
+    const petData = {
+      name,
+      species,
+      breed: breed || '',
+      age,
+      gender,
+      size,
+      status, // 'available', 'foster-needed', 'adopted', 'pending'
+      description,
+      specialNeeds: specialNeeds || '',
+      medicalInfo: medicalInfo || '',
+      location: location || '',
+      imageUrl: req.file ? `/uploads/pets/${req.file.filename}` : ''
+    };
+    
+    const newPet = await addPet(petData);
+    
+    res.json({ 
+      success: true, 
+      message: 'Pet added successfully!',
+      pet: newPet
+    });
+    
+  } catch (error) {
+    console.error('Error adding pet:', error);
+    res.status(500).json({ 
+      error: 'Error adding pet',
+      message: error.message 
+    });
+  }
+});
+
+// Update a pet
+app.put('/api/pets/:id', upload.single('image'), handleMulterError, async (req, res) => {
+  try {
+    const existingPet = await getPetById(req.params.id);
+    
+    if (!existingPet) {
+      return res.status(404).json({ 
+        error: 'Pet not found' 
+      });
+    }
+    
+    const { name, species, breed, age, gender, size, status, description, specialNeeds, medicalInfo, location } = req.body;
+    
+    const petData = {
+      name: name || existingPet.name,
+      species: species || existingPet.species,
+      breed: breed || existingPet.breed,
+      age: age || existingPet.age,
+      gender: gender || existingPet.gender,
+      size: size || existingPet.size,
+      status: status || existingPet.status,
+      description: description || existingPet.description,
+      specialNeeds: specialNeeds || existingPet.specialNeeds,
+      medicalInfo: medicalInfo || existingPet.medicalInfo,
+      location: location || existingPet.location,
+      imageUrl: req.file ? `/uploads/pets/${req.file.filename}` : existingPet.imageUrl
+    };
+    
+    const updatedPet = await updatePet(req.params.id, petData);
+    
+    res.json({ 
+      success: true, 
+      message: 'Pet updated successfully!',
+      pet: updatedPet
+    });
+    
+  } catch (error) {
+    console.error('Error updating pet:', error);
+    res.status(500).json({ 
+      error: 'Error updating pet',
+      message: error.message 
+    });
+  }
+});
+
+// Delete a pet
+app.delete('/api/pets/:id', async (req, res) => {
+  try {
+    const deletedPet = await deletePet(req.params.id);
+    
+    if (!deletedPet) {
+      return res.status(404).json({ 
+        error: 'Pet not found' 
+      });
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Pet deleted successfully!',
+      pet: deletedPet
+    });
+    
+  } catch (error) {
+    console.error('Error deleting pet:', error);
+    res.status(500).json({ 
+      error: 'Error deleting pet',
+      message: error.message 
+    });
+  }
+});
+
+
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
