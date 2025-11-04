@@ -599,6 +599,111 @@ const createFosterEmailTemplate = (formData) => {
   `;
 };
 
+const createAdoptEmailTemplate = (formData) => {
+  console.log('Adoption email template received formData:', JSON.stringify(formData, null, 2));
+  console.log('interestedPet in template:', formData.interestedPet);
+  console.log('petInfo in template:', formData.petInfo);
+  
+  // Helper function to safely get pet info
+  const petInfo = formData.petInfo || {};
+  const hasPetInfo = petInfo && Object.keys(petInfo).length > 0;
+  
+  // Build pet information section
+  let petInfoSection = '';
+  if (hasPetInfo) {
+    petInfoSection = `
+        <div class="section" style="background: #e8f5e9; border-left: 4px solid #4caf50;">
+          <h3>🐾 Pet Information - Interested in Adopting</h3>
+          <div class="field"><span class="label">Name:</span> <span class="value">${petInfo.name || 'N/A'}</span></div>
+          <div class="field"><span class="label">ID:</span> <span class="value">${petInfo.id || 'N/A'}</span></div>
+          <div class="field"><span class="label">Species:</span> <span class="value">${petInfo.species || 'N/A'} ${petInfo.breed ? `(${petInfo.breed})` : ''}</span></div>
+          <div class="field"><span class="label">Age:</span> <span class="value">${petInfo.age || 'N/A'}</span></div>
+          <div class="field"><span class="label">Gender:</span> <span class="value">${petInfo.gender || 'N/A'}</span></div>
+          <div class="field"><span class="label">Size:</span> <span class="value">${petInfo.size || 'N/A'}</span></div>
+          ${petInfo.color ? `<div class="field"><span class="label">Color:</span> <span class="value">${petInfo.color}</span></div>` : ''}
+          ${petInfo.status ? `<div class="field"><span class="label">Status:</span> <span class="value">${petInfo.status}</span></div>` : ''}
+          ${petInfo.adoptionFee ? `<div class="field"><span class="label">Adoption Fee:</span> <span class="value">$${petInfo.adoptionFee}</span></div>` : ''}
+          ${petInfo.microchipId ? `<div class="field"><span class="label">Microchip ID:</span> <span class="value">${petInfo.microchipId}</span></div>` : ''}
+          ${petInfo.description ? `<div class="field" style="margin-top: 12px;"><span class="label">Description:</span><div class="value" style="margin-top: 4px; font-style: italic;">${petInfo.description}</div></div>` : ''}
+          ${petInfo.specialNeeds ? `<div class="field" style="margin-top: 12px;"><span class="label">Special Needs:</span><div class="value" style="margin-top: 4px; color: #d32f2f;">${petInfo.specialNeeds}</div></div>` : ''}
+          ${petInfo.medicalInfo ? `<div class="field" style="margin-top: 12px;"><span class="label">Medical Information:</span><div class="value" style="margin-top: 4px;">${petInfo.medicalInfo}</div></div>` : ''}
+          ${petInfo.behaviorNotes ? `<div class="field" style="margin-top: 12px;"><span class="label">Behavior Notes:</span><div class="value" style="margin-top: 4px;">${petInfo.behaviorNotes}</div></div>` : ''}
+          ${petInfo.imageUrl ? `<div class="field" style="margin-top: 12px;"><span class="label">Photo URL:</span><div class="value" style="margin-top: 4px; word-break: break-all;">${petInfo.imageUrl}</div></div>` : ''}
+        </div>
+    `;
+  } else if (formData.interestedPet) {
+    // Fallback to old format if petInfo is not available
+    petInfoSection = `
+        <div class="section">
+          <h3>🐾 Interested in Adopting</h3>
+          <div class="field"><span class="label">Pet:</span> <span class="value">${formData.interestedPet}</span></div>
+        </div>
+    `;
+  }
+  
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #4caf50, #66bb6a); color: white; padding: 20px; border-radius: 10px 10px 0 0; text-align: center; }
+        .content { background: #f9f9f9; padding: 20px; border-radius: 0 0 10px 10px; }
+        .section { background: white; margin: 15px 0; padding: 15px; border-radius: 8px; border-left: 4px solid #4caf50; }
+        .section h3 { color: #4caf50; margin-top: 0; font-size: 16px; text-transform: uppercase; letter-spacing: 1px; }
+        .field { margin: 8px 0; }
+        .label { font-weight: bold; color: #555; }
+        .value { color: #333; }
+        .footer { text-align: center; margin-top: 20px; padding: 15px; background: #e8e8e8; border-radius: 8px; font-size: 14px; color: #666; }
+        .paw { font-size: 20px; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <h1>💚 New Adoption Application</h1>
+        <p>Chester & Chubbs Foundation</p>
+      </div>
+      
+      <div class="content">
+        <div class="section">
+          <h3>👤 Personal Information</h3>
+          <div class="field"><span class="label">Name:</span> <span class="value">${formData.name}</span></div>
+          <div class="field"><span class="label">Email:</span> <span class="value">${formData.email}</span></div>
+          <div class="field"><span class="label">Phone:</span> <span class="value">${formData.phone}</span></div>
+          <div class="field"><span class="label">Address:</span> <span class="value">${formData.address}</span></div>
+        </div>
+        
+        ${petInfoSection}
+        
+        <div class="section">
+          <h3>🏡 Home Information</h3>
+          <div class="field"><span class="label">Home Ownership:</span> <span class="value">${formData.homeOwnership}</span></div>
+          <div class="field"><span class="label">Has Other Pets:</span> <span class="value">${formData.hasOtherPets}</span></div>
+          <div class="field"><span class="label">Has Children:</span> <span class="value">${formData.hasChildren}</span></div>
+          <div class="field"><span class="label">Experience with Pets:</span> <span class="value">${formData.experience}</span></div>
+        </div>
+        
+        <div class="section">
+          <h3>📝 About Their Home & Why They Want to Adopt</h3>
+          <div class="value">${formData.about}</div>
+        </div>
+        
+        <div class="section">
+          <h3>✅ Agreements</h3>
+          <div class="field"><span class="label">Adult/Consent:</span> <span class="value">${formData.adultConsent}</span></div>
+        </div>
+      </div>
+      
+      <div class="footer">
+        <p><span class="paw">🐾</span> You have received a new adoption application! <span class="paw">🐾</span></p>
+        <p>This email was automatically generated from our website adoption application form.</p>
+      </div>
+    </body>
+    </html>
+  `;
+};
+
 const createContactEmailTemplate = (formData) => {
   return `
     <!DOCTYPE html>
@@ -814,6 +919,64 @@ app.post('/api/submit-foster', async (req, res) => {
     console.error('Error submitting foster form:', error);
     res.status(500).json({ 
       error: 'Error submitting foster form',
+      message: error.message 
+    });
+  }
+});
+
+// Adoption form submission endpoint
+app.post('/api/submit-adopt', async (req, res) => {
+  try {
+    const formData = req.body;
+    console.log('Adoption form data received:', JSON.stringify(formData, null, 2));
+    
+    // Validate required fields
+    const requiredFields = ['name', 'email', 'phone', 'address', 'homeOwnership', 'hasOtherPets', 'hasChildren', 'experience', 'about'];
+    const missingFields = requiredFields.filter(field => !formData[field]);
+    
+    if (missingFields.length > 0) {
+      return res.status(400).json({ 
+        error: 'Missing required fields', 
+        missingFields 
+      });
+    }
+    
+    // Prepare email data - include all formData including petInfo
+    const emailData = {
+      ...formData,
+      adultConsent: formData.isAdultOrConsent ? 'Yes' : 'No',
+      interestedPet: formData.interestedPet || ''
+    };
+    
+    // Send email - use petInfo.name if available, otherwise fall back to interestedPet
+    let subject = 'New Adoption Application - Chester & Chubbs Foundation';
+    if (formData.petInfo && formData.petInfo.name) {
+      subject = `New Adoption Application for ${formData.petInfo.name} - Chester & Chubbs Foundation`;
+    } else if (formData.interestedPet) {
+      subject = `New Adoption Application for ${formData.interestedPet} - Chester & Chubbs Foundation`;
+    }
+    
+    console.log('Email data being sent to template:', JSON.stringify(emailData, null, 2));
+    console.log('petInfo value:', emailData.petInfo);
+    
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
+      subject: subject,
+      html: createAdoptEmailTemplate(emailData)
+    };
+    
+    await transporter.sendMail(mailOptions);
+    
+    res.json({ 
+      success: true, 
+      message: 'Adoption application submitted successfully!' 
+    });
+    
+  } catch (error) {
+    console.error('Error submitting adoption form:', error);
+    res.status(500).json({ 
+      error: 'Error submitting adoption form',
       message: error.message 
     });
   }
