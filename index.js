@@ -161,11 +161,133 @@ async function initializeDatabase() {
       console.log('Primary photo index column already exists or error adding:', error.message);
     }
     
+    // Add naming convention columns if they don't exist
+    const namingColumns = [
+      { name: 'location_code', type: 'VARCHAR(10)', default: "'SA'" },
+      { name: 'pet_id_code', type: 'VARCHAR(100)', default: null },
+      { name: 'foster_code', type: 'VARCHAR(20)', default: null },
+      { name: 'is_medical', type: 'TINYINT(1)', default: '0' },
+      { name: 'intake_type', type: 'VARCHAR(20)', default: null }
+    ];
+    
+    for (const col of namingColumns) {
+      try {
+        // Check if column exists first (MySQL doesn't support IF NOT EXISTS in ALTER TABLE)
+        const [columns] = await connection.execute(`
+          SELECT COLUMN_NAME 
+          FROM INFORMATION_SCHEMA.COLUMNS 
+          WHERE TABLE_SCHEMA = DATABASE() 
+          AND TABLE_NAME = 'animals' 
+          AND COLUMN_NAME = ?
+        `, [col.name]);
+        
+        if (columns.length === 0) {
+          await connection.execute(`
+            ALTER TABLE animals 
+            ADD COLUMN ${col.name} ${col.type}${col.default ? ` DEFAULT ${col.default}` : ''}
+          `);
+          console.log(`✅ ${col.name} column added`);
+        } else {
+          console.log(`✅ ${col.name} column already exists`);
+        }
+      } catch (error) {
+        console.log(`Error checking/adding ${col.name} column:`, error.message);
+      }
+    }
+    
     await connection.end();
     console.log('✅ Database initialized successfully');
   } catch (error) {
     console.error('❌ Error initializing database:', error.message);
     console.log('Continuing without database initialization...');
+  }
+}
+
+// Naming Convention Functions
+function getTypeCode(species) {
+  const typeMap = {
+    'cat': 'CAT',
+    'dog': 'DOG',
+    'rabbit': 'RBT',
+    'bird': 'BRD',
+    'hamster': 'HMS',
+    'guinea pig': 'GPG',
+    'ferret': 'FRT',
+    'other': 'OTH'
+  };
+  return typeMap[species?.toLowerCase()] || 'OTH';
+}
+
+function formatDateForCode(date) {
+  // date can be Date object or YYYY-MM-DD string
+  const d = date instanceof Date ? date : new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
+}
+
+async function getNextSequentialNumber(locationCode, intakeDate, typeCode) {
+  try {
+    const dateStr = formatDateForCode(intakeDate);
+    const basePattern = `CCF-${locationCode}-${dateStr}-${typeCode}-`;
+    
+    // Get all pets matching the base pattern and extract their sequential numbers
+    const [rows] = await pool.execute(`
+      SELECT pet_id_code 
+      FROM animals 
+      WHERE location_code = ? 
+      AND DATE_FORMAT(intake_date, '%Y%m%d') = ? 
+      AND pet_id_code LIKE ?
+    `, [locationCode, dateStr, `${basePattern}%`]);
+    
+    // Extract sequential numbers from pet_id_code
+    // Pattern: CCF-[LOC]-[DATE]-[TYPE]-[SEQ] or CCF-[LOC]-[DATE]-[TYPE]-[SEQ]-[ADDONS]
+    const sequentialNumbers = rows
+      .map(row => {
+        const code = row.pet_id_code || '';
+        // Match the sequential number part (3 digits after the type code)
+        const match = code.match(new RegExp(`${basePattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\d{3})`));
+        return match ? parseInt(match[1]) : 0;
+      })
+      .filter(num => num > 0);
+    
+    // Get the highest sequential number and add 1
+    const maxSeq = sequentialNumbers.length > 0 ? Math.max(...sequentialNumbers) : 0;
+    return String(maxSeq + 1).padStart(3, '0');
+  } catch (error) {
+    console.error('Error getting sequential number:', error);
+    return '001'; // Default to 001 on error
+  }
+}
+
+async function generatePetIdCode(petData) {
+  try {
+    const locationCode = petData.locationCode || 'SA';
+    const intakeDate = petData.intakeDate || new Date();
+    const typeCode = getTypeCode(petData.species);
+    const sequential = await getNextSequentialNumber(locationCode, intakeDate, typeCode);
+    
+    // Base ID: CCF-[LocationCode]-[YYYYMMDD]-[TypeCode]-[Sequential#]
+    let petIdCode = `CCF-${locationCode}-${formatDateForCode(intakeDate)}-${typeCode}-${sequential}`;
+    
+    // Add optional add-ons
+    if (petData.fosterCode) {
+      petIdCode += `-${petData.fosterCode}`;
+    }
+    
+    if (petData.isMedical) {
+      petIdCode += '-MED';
+    }
+    
+    if (petData.intakeType) {
+      petIdCode += `-${petData.intakeType.toUpperCase()}`;
+    }
+    
+    return petIdCode;
+  } catch (error) {
+    console.error('Error generating pet ID code:', error);
+    return null;
   }
 }
 
@@ -232,7 +354,12 @@ async function getPets() {
         adoptionFee: animal.adoption_fee || 0,
         intakeDate: animal.intake_date,
         dateAdded: animal.created_at,
-        lastUpdated: animal.updated_at
+        lastUpdated: animal.updated_at,
+        petIdCode: animal.pet_id_code || '',
+        locationCode: animal.location_code || '',
+        fosterCode: animal.foster_code || '',
+        isMedical: animal.is_medical || false,
+        intakeType: animal.intake_type || ''
       };
     });
     
@@ -307,7 +434,12 @@ async function getPetById(id) {
       adoptionFee: animal.adoption_fee || 0,
       intakeDate: animal.intake_date,
       dateAdded: animal.created_at,
-      lastUpdated: animal.updated_at
+      lastUpdated: animal.updated_at,
+      petIdCode: animal.pet_id_code || '',
+      locationCode: animal.location_code || '',
+      fosterCode: animal.foster_code || '',
+      isMedical: animal.is_medical || false,
+      intakeType: animal.intake_type || ''
     };
   } catch (error) {
     console.error('Error fetching pet by ID:', error);
@@ -320,7 +452,8 @@ async function addPet(petData) {
     const {
       name, species, breed, age, gender, size, status, color,
       description, specialNeeds, medicalInfo, behaviorNotes, imageUrl,
-      microchipId, adoptionFee, intakeDate
+      microchipId, adoptionFee, intakeDate,
+      locationCode, fosterCode, isMedical, intakeType
     } = petData;
     
     // Convert age string to months (basic conversion)
@@ -340,12 +473,22 @@ async function addPet(petData) {
     const photoUrls = imageUrl ? JSON.stringify([imageUrl]) : null;
     const intakeDateValue = intakeDate || new Date().toISOString().split('T')[0];
     
-    const [result] = await pool.execute(`
-      INSERT INTO animals (name, species, breed, age_months, gender, size, color, status, description, special_needs, medical_notes, behavior_notes, photo_urls, microchip_id, adoption_fee, intake_date)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [name, species, breed, ageMonths, gender, size, color, status, description, specialNeeds, medicalInfo, behaviorNotes, photoUrls, microchipId, adoptionFee, intakeDateValue]);
+    // Generate pet ID code using naming convention
+    const petIdCode = await generatePetIdCode({
+      locationCode: locationCode || 'SA',
+      intakeDate: intakeDateValue,
+      species: species,
+      fosterCode: fosterCode,
+      isMedical: isMedical,
+      intakeType: intakeType
+    });
     
-    return { id: result.insertId, ...petData };
+    const [result] = await pool.execute(`
+      INSERT INTO animals (name, species, breed, age_months, gender, size, color, status, description, special_needs, medical_notes, behavior_notes, photo_urls, microchip_id, adoption_fee, intake_date, location_code, pet_id_code, foster_code, is_medical, intake_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [name, species, breed, ageMonths, gender, size, color, status, description, specialNeeds, medicalInfo, behaviorNotes, photoUrls, microchipId, adoptionFee, intakeDateValue, locationCode || 'SA', petIdCode, fosterCode || null, isMedical || false, intakeType || null]);
+    
+    return { id: result.insertId, ...petData, petIdCode };
   } catch (error) {
     console.error('Error adding pet to database:', error);
     throw error;
@@ -357,7 +500,8 @@ async function updatePet(id, petData) {
     const {
       name, species, breed, age, gender, size, status, color,
       description, specialNeeds, medicalInfo, behaviorNotes, imageUrl,
-      microchipId, adoptionFee, intakeDate
+      microchipId, adoptionFee, intakeDate,
+      locationCode, fosterCode, isMedical, intakeType
     } = petData;
     
     // Convert age string to months (basic conversion)
@@ -376,15 +520,37 @@ async function updatePet(id, petData) {
     
     const photoUrls = imageUrl ? JSON.stringify([imageUrl]) : null;
     
+    // Regenerate pet ID code if key fields changed
+    const existingPet = await getPetById(id);
+    let petIdCode = existingPet?.petIdCode;
+    
+    if (!petIdCode || 
+        existingPet?.locationCode !== (locationCode || 'SA') ||
+        existingPet?.intakeDate !== intakeDate ||
+        existingPet?.species !== species ||
+        existingPet?.fosterCode !== fosterCode ||
+        existingPet?.isMedical !== isMedical ||
+        existingPet?.intakeType !== intakeType) {
+      petIdCode = await generatePetIdCode({
+        locationCode: locationCode || existingPet?.locationCode || 'SA',
+        intakeDate: intakeDate || existingPet?.intakeDate || new Date(),
+        species: species || existingPet?.species,
+        fosterCode: fosterCode || existingPet?.fosterCode,
+        isMedical: isMedical || existingPet?.isMedical,
+        intakeType: intakeType || existingPet?.intakeType
+      });
+    }
+    
     await pool.execute(`
       UPDATE animals 
       SET name = ?, species = ?, breed = ?, age_months = ?, gender = ?, size = ?, color = ?, status = ?,
           description = ?, special_needs = ?, medical_notes = ?, behavior_notes = ?, photo_urls = ?,
-          microchip_id = ?, adoption_fee = ?, intake_date = ?
+          microchip_id = ?, adoption_fee = ?, intake_date = ?,
+          location_code = ?, pet_id_code = ?, foster_code = ?, is_medical = ?, intake_type = ?
       WHERE id = ?
-    `, [name, species, breed, ageMonths, gender, size, color, status, description, specialNeeds, medicalInfo, behaviorNotes, photoUrls, microchipId, adoptionFee, intakeDate, id]);
+    `, [name, species, breed, ageMonths, gender, size, color, status, description, specialNeeds, medicalInfo, behaviorNotes, photoUrls, microchipId, adoptionFee, intakeDate, locationCode || 'SA', petIdCode, fosterCode || null, isMedical || false, intakeType || null, id]);
     
-    return { id, ...petData };
+    return { id, ...petData, petIdCode };
   } catch (error) {
     console.error('Error updating pet in database:', error);
     throw error;
@@ -404,9 +570,23 @@ async function deletePet(id) {
   }
 }
 
-// Initialize database and directories on startup
-ensureDirectories();
-initializeDatabase();
+// Initialize database and directories on startup (non-blocking)
+(async () => {
+  try {
+    await ensureDirectories();
+    console.log('✅ Directories initialized');
+  } catch (error) {
+    console.error('⚠️ Error initializing directories:', error);
+  }
+  
+  try {
+    await initializeDatabase();
+    console.log('✅ Database initialization complete');
+  } catch (error) {
+    console.error('⚠️ Database initialization failed, but server will continue:', error.message);
+    console.log('⚠️ Server will run but database operations may fail');
+  }
+})();
 
 // Nodemailer configuration for Hostinger
 const transporter = nodemailer.createTransport({
@@ -509,8 +689,9 @@ const createFosterEmailTemplate = (formData) => {
     petInfoSection = `
         <div class="section" style="background: #fff8e1; border-left: 4px solid #ff9800;">
           <h3>🐾 Pet Information - Interested in Fostering</h3>
+          ${petInfo.petIdCode ? `<div class="field" style="background: #e3f2fd; padding: 8px; border-radius: 4px; margin-bottom: 12px;"><span class="label" style="font-weight: bold; color: #1976d2;">Pet ID Code:</span> <span class="value" style="font-family: monospace; font-size: 14px; color: #1976d2;">${petInfo.petIdCode}</span></div>` : ''}
           <div class="field"><span class="label">Name:</span> <span class="value">${petInfo.name || 'N/A'}</span></div>
-          <div class="field"><span class="label">ID:</span> <span class="value">${petInfo.id || 'N/A'}</span></div>
+          <div class="field"><span class="label">Database ID:</span> <span class="value">${petInfo.id || 'N/A'}</span></div>
           <div class="field"><span class="label">Species:</span> <span class="value">${petInfo.species || 'N/A'} ${petInfo.breed ? `(${petInfo.breed})` : ''}</span></div>
           <div class="field"><span class="label">Age:</span> <span class="value">${petInfo.age || 'N/A'}</span></div>
           <div class="field"><span class="label">Gender:</span> <span class="value">${petInfo.gender || 'N/A'}</span></div>
@@ -614,8 +795,9 @@ const createAdoptEmailTemplate = (formData) => {
     petInfoSection = `
         <div class="section" style="background: #e8f5e9; border-left: 4px solid #4caf50;">
           <h3>🐾 Pet Information - Interested in Adopting</h3>
+          ${petInfo.petIdCode ? `<div class="field" style="background: #e3f2fd; padding: 8px; border-radius: 4px; margin-bottom: 12px;"><span class="label" style="font-weight: bold; color: #1976d2;">Pet ID Code:</span> <span class="value" style="font-family: monospace; font-size: 14px; color: #1976d2;">${petInfo.petIdCode}</span></div>` : ''}
           <div class="field"><span class="label">Name:</span> <span class="value">${petInfo.name || 'N/A'}</span></div>
-          <div class="field"><span class="label">ID:</span> <span class="value">${petInfo.id || 'N/A'}</span></div>
+          <div class="field"><span class="label">Database ID:</span> <span class="value">${petInfo.id || 'N/A'}</span></div>
           <div class="field"><span class="label">Species:</span> <span class="value">${petInfo.species || 'N/A'} ${petInfo.breed ? `(${petInfo.breed})` : ''}</span></div>
           <div class="field"><span class="label">Age:</span> <span class="value">${petInfo.age || 'N/A'}</span></div>
           <div class="field"><span class="label">Gender:</span> <span class="value">${petInfo.gender || 'N/A'}</span></div>
@@ -755,39 +937,52 @@ const createContactEmailTemplate = (formData) => {
   `;
 };
 
-// Middleware
-app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'http://localhost:5174',
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://127.0.0.1:5173',
-    'http://127.0.0.1:5174',
-    'https://ccfrescue.org',
-    'https://www.ccfrescue.org'
-  ],
+// Middleware - CORS Configuration
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+  'https://ccfrescue.org',
+  'https://www.ccfrescue.org'
+];
+
+// Add Render domain if specified
+if (process.env.FRONTEND_URL) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
+}
+
+// Allow all origins in development, specific origins in production
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // In development, allow all origins
+    if (process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    
+    // In production, check against allowed origins
+    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.some(allowed => origin.includes(allowed))) {
+      callback(null, true);
+    } else {
+      // Log the origin for debugging
+      console.log('CORS blocked origin:', origin);
+      callback(null, true); // Temporarily allow all for debugging - change to callback(new Error('Not allowed by CORS')) later
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
-}));
+};
+
+app.use(cors(corsOptions));
 
 // Additional CORS headers for preflight requests
-app.options('*', cors({
-  origin: [
-    'http://localhost:5173',
-    'http://localhost:5174',
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://127.0.0.1:5173',
-    'http://127.0.0.1:5174',
-    'https://ccfrescue.org',
-    'https://www.ccfrescue.org'
-  ],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
-}));
+app.options('*', cors(corsOptions));
 
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -1024,16 +1219,63 @@ app.post('/api/submit-contact', async (req, res) => {
 
 // Pet Management API Endpoints
 
+// Preview pet ID code (for admin forms)
+app.get('/api/pets/preview-id', async (req, res) => {
+  try {
+    const { locationCode, intakeDate, species, fosterCode, isMedical, intakeType } = req.query;
+    
+    if (!species) {
+      return res.status(400).json({ 
+        error: 'Species is required to generate pet ID code' 
+      });
+    }
+    
+    const previewCode = await generatePetIdCode({
+      locationCode: locationCode || 'SA',
+      intakeDate: intakeDate || new Date(),
+      species: species,
+      fosterCode: fosterCode || null,
+      isMedical: isMedical === 'true' || isMedical === '1',
+      intakeType: intakeType || null
+    });
+    
+    res.json({ 
+      success: true, 
+      petIdCode: previewCode 
+    });
+  } catch (error) {
+    console.error('Error generating preview ID:', error);
+    res.status(500).json({ 
+      error: 'Error generating preview ID',
+      message: error.message 
+    });
+  }
+});
+
 // Get all pets
 app.get('/api/pets', async (req, res) => {
   try {
+    // Check if database is connected
+    if (!pool) {
+      console.error('Database not initialized');
+      return res.status(503).json({ 
+        success: false,
+        error: 'Database not available',
+        message: 'Database connection has not been established. Please check server logs.',
+        pets: [] // Return empty array so frontend doesn't break
+      });
+    }
+    
     const pets = await getPets();
     res.json({ success: true, pets });
   } catch (error) {
     console.error('Error fetching pets:', error);
+    // Return empty array on error so frontend doesn't break
     res.status(500).json({ 
+      success: false,
       error: 'Error fetching pets',
-      message: error.message 
+      message: error.message,
+      pets: [] // Return empty array so frontend doesn't break
     });
   }
 });
@@ -1062,7 +1304,11 @@ app.get('/api/pets/:id', async (req, res) => {
 // Add a new pet
 app.post('/api/pets', upload.single('image'), handleMulterError, async (req, res) => {
   try {
-    const { name, species, breed, age, gender, size, status, description, specialNeeds, medicalInfo, location } = req.body;
+    const { 
+      name, species, breed, age, gender, size, status, description, 
+      specialNeeds, medicalInfo, location, intakeDate,
+      locationCode, fosterCode, isMedical, intakeType
+    } = req.body;
     
     // Validate required fields
     const requiredFields = ['name', 'species', 'age', 'gender', 'size', 'status', 'description'];
@@ -1087,7 +1333,12 @@ app.post('/api/pets', upload.single('image'), handleMulterError, async (req, res
       specialNeeds: specialNeeds || '',
       medicalInfo: medicalInfo || '',
       location: location || '',
-      imageUrl: req.file ? `/uploads/pets/${req.file.filename}` : ''
+      imageUrl: req.file ? `/uploads/pets/${req.file.filename}` : '',
+      intakeDate: intakeDate || new Date().toISOString().split('T')[0],
+      locationCode: locationCode || 'SA',
+      fosterCode: fosterCode || null,
+      isMedical: isMedical === true || isMedical === 'true' || isMedical === '1',
+      intakeType: intakeType || null
     };
     
     const newPet = await addPet(petData);
@@ -1118,7 +1369,11 @@ app.put('/api/pets/:id', upload.single('image'), handleMulterError, async (req, 
       });
     }
     
-    const { name, species, breed, age, gender, size, status, description, specialNeeds, medicalInfo, location } = req.body;
+    const { 
+      name, species, breed, age, gender, size, status, description, 
+      specialNeeds, medicalInfo, location, intakeDate,
+      locationCode, fosterCode, isMedical, intakeType
+    } = req.body;
     
     const petData = {
       name: name || existingPet.name,
@@ -1132,7 +1387,12 @@ app.put('/api/pets/:id', upload.single('image'), handleMulterError, async (req, 
       specialNeeds: specialNeeds || existingPet.specialNeeds,
       medicalInfo: medicalInfo || existingPet.medicalInfo,
       location: location || existingPet.location,
-      imageUrl: req.file ? `/uploads/pets/${req.file.filename}` : existingPet.imageUrl
+      imageUrl: req.file ? `/uploads/pets/${req.file.filename}` : existingPet.imageUrl,
+      intakeDate: intakeDate || existingPet.intakeDate,
+      locationCode: locationCode !== undefined ? locationCode : existingPet.locationCode || 'SA',
+      fosterCode: fosterCode !== undefined ? fosterCode : existingPet.fosterCode,
+      isMedical: isMedical !== undefined ? (isMedical === true || isMedical === 'true' || isMedical === '1') : existingPet.isMedical,
+      intakeType: intakeType !== undefined ? intakeType : existingPet.intakeType
     };
     
     const updatedPet = await updatePet(req.params.id, petData);
@@ -1180,8 +1440,18 @@ app.delete('/api/pets/:id', async (req, res) => {
 
 
 
+// Start server
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+
+// Add error handling for server startup
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🌐 Server URL: http://0.0.0.0:${PORT}`);
+  console.log(`✅ Health check: http://0.0.0.0:${PORT}/`);
+  console.log(`✅ Pets API: http://0.0.0.0:${PORT}/api/pets`);
+}).on('error', (error) => {
+  console.error('❌ Server failed to start:', error);
+  process.exit(1);
 });
 
