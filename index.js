@@ -989,7 +989,16 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Health check endpoint
 app.get('/', (req, res) => {
-  res.json({ message: 'Chester & Chubbs Foundation API is running!' });
+  console.log('GET / - Health check requested');
+  res.json({ 
+    message: 'Chester & Chubbs Foundation API is running!',
+    timestamp: new Date().toISOString(),
+    routes: {
+      health: '/',
+      pets: '/api/pets',
+      petById: '/api/pets/:id'
+    }
+  });
 });
 
 
@@ -1254,25 +1263,28 @@ app.get('/api/pets/preview-id', async (req, res) => {
 
 // Get all pets
 app.get('/api/pets', async (req, res) => {
+  console.log('GET /api/pets - Request received');
   try {
     // Check if database is connected
     if (!pool) {
-      console.error('Database not initialized');
-      return res.status(503).json({ 
-        success: false,
+      console.error('Database not initialized - returning empty array');
+      return res.status(200).json({ 
+        success: true,
         error: 'Database not available',
         message: 'Database connection has not been established. Please check server logs.',
         pets: [] // Return empty array so frontend doesn't break
       });
     }
     
+    console.log('Fetching pets from database...');
     const pets = await getPets();
+    console.log(`Found ${pets.length} pets`);
     res.json({ success: true, pets });
   } catch (error) {
     console.error('Error fetching pets:', error);
     // Return empty array on error so frontend doesn't break
-    res.status(500).json({ 
-      success: false,
+    res.status(200).json({ 
+      success: true,
       error: 'Error fetching pets',
       message: error.message,
       pets: [] // Return empty array so frontend doesn't break
@@ -1438,7 +1450,16 @@ app.delete('/api/pets/:id', async (req, res) => {
   }
 });
 
-
+// 404 handler - must be after all routes
+app.use('*', (req, res) => {
+  console.log(`404 - Route not found: ${req.method} ${req.originalUrl}`);
+  res.status(404).json({ 
+    error: 'Route not found',
+    method: req.method,
+    path: req.originalUrl,
+    message: `Cannot ${req.method} ${req.originalUrl}`
+  });
+});
 
 // Start server
 const PORT = process.env.PORT || 3001;
