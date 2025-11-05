@@ -1001,6 +1001,15 @@ app.get('/', (req, res) => {
   });
 });
 
+// Test route to verify route registration
+app.get('/api/test', (req, res) => {
+  console.log('GET /api/test - Test route hit');
+  res.json({ 
+    success: true, 
+    message: 'Test route is working!',
+    timestamp: new Date().toISOString()
+  });
+});
 
 // Volunteer form submission endpoint
 app.post('/api/submit-volunteer', async (req, res) => {
@@ -1261,9 +1270,10 @@ app.get('/api/pets/preview-id', async (req, res) => {
   }
 });
 
-// Get all pets
+// Get all pets - MUST be before /api/pets/:id route
 app.get('/api/pets', async (req, res) => {
   console.log('GET /api/pets - Request received');
+  console.log('Route handler executing...');
   try {
     // Check if database is connected
     if (!pool) {
@@ -1461,6 +1471,18 @@ app.use('*', (req, res) => {
   });
 });
 
+// Debug: Log all registered routes
+console.log('\n📋 Registered Routes:');
+const routes = [];
+app._router.stack.forEach(function(middleware){
+  if(middleware.route){
+    routes.push(Object.keys(middleware.route.methods) + ' ' + middleware.route.path);
+  } else if(middleware.name === 'router'){
+    routes.push('Router: ' + (middleware.regexp.source || 'unknown'));
+  }
+});
+console.log('Routes:', routes);
+
 // Start server
 const PORT = process.env.PORT || 3001;
 
@@ -1471,6 +1493,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Server URL: http://0.0.0.0:${PORT}`);
   console.log(`✅ Health check: http://0.0.0.0:${PORT}/`);
   console.log(`✅ Pets API: http://0.0.0.0:${PORT}/api/pets`);
+  console.log(`✅ Test route: http://0.0.0.0:${PORT}/api/test`);
 }).on('error', (error) => {
   console.error('❌ Server failed to start:', error);
   process.exit(1);
